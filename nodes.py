@@ -114,12 +114,12 @@ def optical_flow_to_image(dx, dy, *, mode='saturation', sensitivity=None):
     return rgb
 
 class WarpedNoiseBase:
-    RETURN_TYPES = ("LATENT", "IMAGE", "IMAGE",)
-    RETURN_NAMES = ("noise", "visualization", "optical_flows")
+    RETURN_TYPES = ("LATENT", "IMAGE", "IMAGE", "NOISE_STATE")
+    RETURN_NAMES = ("noise", "visualization", "optical_flows", "seed_noise")
     FUNCTION = "warp"
     CATEGORY = "NoiseWarp"
 
-    def _process_video_frames(self, images, noise_channels, device, downscale_factor, resize_flow, return_flows=True):
+    def _process_video_frames(self, images, noise_channels, device, downscale_factor, resize_flow, seed_noise=None, return_flows=True):
         B, H, W, C = images.shape
         video_frames = images.permute(0, 3, 1, 2)
         
@@ -131,6 +131,10 @@ class WarpedNoiseBase:
             post_noise_alpha=0,
             progressive_noise_alpha=0,
         )
+
+        # If seed_noise is provided, replace the initial state
+        if seed_noise is not None:
+            warper._state = seed_noise.to(device)
 
         raft_model = RaftOpticalFlow(device, "large")
         raft_model.model.to(device)
@@ -159,20 +163,25 @@ class WarpedNoiseBase:
             numpy_noises.append(down_noise.cpu().numpy().astype(np.float16))
             pbar.update(1)
 
-        return np.stack(numpy_noises), np.stack(rgb_flows) if return_flows else None
+        # Return the final warper state as seed_noise
+        final_state = warper._state.cpu()
+
+        return np.stack(numpy_noises), (np.stack(rgb_flows) if return_flows else None), final_state
 
     def warp(self, images, noise_channels, noise_downtemp_interp, degradation, 
-             target_latent_count, latent_shape, spatial_downscale_factor, seed, model=None, sigmas=None, return_flows=True, output_device="CPU"):
+             target_latent_count, latent_shape, spatial_downscale_factor, seed, model=None, sigmas=None, seed_noise=None, return_flows=True, output_device="CPU"):
         device = mm.get_torch_device()
-        
-        torch.manual_seed(seed)
-        
+
+        # Only set manual seed if seed_noise is not provided
+        if seed_noise is None:
+            torch.manual_seed(seed)
+
         resize_flow = 1
         resize_frames = 1
         downscale_factor = round(resize_frames * resize_flow) * spatial_downscale_factor
 
         numpy_noises, rgb_flows = self._process_video_frames(
-            images, noise_channels, device, downscale_factor, resize_flow, return_flows=return_flows
+            images, noise_channels, device, downscale_factor, resize_flow, seed_noise=seed_noise, return_flows=return_flows
         )
 
         # Process noise tensor
@@ -213,7 +222,7 @@ class WarpedNoiseBase:
 
         downtemp_noise_tensor = downtemp_noise_tensor.to(device) if output_device == "GPU" else downtemp_noise_tensor.cpu()
 
-        return {"samples":downtemp_noise_tensor}, vis_tensor_noises, vis_tensor_flows
+        return {"samples":downtemp_noise_tensor}, vis_tensor_noises, vis_tensor_flows, final_state
 
     @staticmethod
     def _downscale_noise(noise, downscale_factor):
@@ -334,16 +343,40 @@ class GetWarpedNoiseFromVideoHunyuan(WarpedNoiseBase):
             return_flows=False
         )
 
+class GetWarpedNoiseFromImg2Img(WarpedNoiseBase):
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "images": ("IMAGE", {"tooltip": "Input images to be warped (can be 2+ frames)"}),
+                "noise_channels": ("INT", {"default": 16, "min": 1, "max": 256, "step": 1}),
+                "noise_downtemp_interp": (["nearest", "blend", "blend_norm", "randn", "disabled"], {"tooltip": "Interpolation method(s) for down-temporal noise"}),
+                "target_latent_count": ("INT", {"default": 13, "min": 1, "max": 2048, "step": 1, "tooltip": "Interpolate to this many latent frames"}),
+                "latent_shape": (["BTCHW", "BCTHW", "BCHW"], {"tooltip": "Shape of the output latent tensor"}),
+                "seed": ("INT", {"default": 123,"min": 0, "max": 0xffffffffffffffff, "step": 1}),
+            },
+            "optional": {
+                "model": ("MODEL", {"tooltip": "Optional, to get the latent scale factor"}),
+                "sigmas": ("SIGMAS", {"tooltip": "Optional, to scale the noise"}),
+                "spatial_downscale_factor": ("INT", {"default": 8, "min": 1, "max": 1024, "step": 1, "tooltip": "latent space spatial scale factor"}),
+                "seed_noise": ("NOISE_STATE", {"tooltip": "Optional, use existing noise state instead of generating new"}),
+            },
+        }
+    
+    RETURN_TYPES = ("LATENT", "IMAGE", "IMAGE", "NOISE_STATE")
+    RETURN_NAMES = ("noise", "visualization", "optical_flows", "seed_noise")
 
 NODE_CLASS_MAPPINGS = {
     "GetWarpedNoiseFromVideo": GetWarpedNoiseFromVideo,
     "GetWarpedNoiseFromVideoAnimateDiff": GetWarpedNoiseFromVideoAnimateDiff,
     "GetWarpedNoiseFromVideoCogVideoX": GetWarpedNoiseFromVideoCogVideoX,
     "GetWarpedNoiseFromVideoHunyuan": GetWarpedNoiseFromVideoHunyuan,
+    "GetWarpedNoiseFromImg2Img": GetWarpedNoiseFromImg2Img,
     }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "GetWarpedNoiseFromVideo": "GetWarpedNoiseFromVideo",
     "GetWarpedNoiseFromVideoAnimateDiff": "GetWarpedNoiseFromVideoAnimateDiff",
     "GetWarpedNoiseFromVideoCogVideoX": "GetWarpedNoiseFromVideoCogVideoX",
     "GetWarpedNoiseFromVideoHunyuan": "GetWarpedNoiseFromVideoHunyuan",
+    "GetWarpedNoiseFromImg2Img": "GetWarpedNoiseFromImg2Img",
     }
