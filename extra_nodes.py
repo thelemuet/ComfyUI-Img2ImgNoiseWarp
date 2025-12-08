@@ -1,6 +1,7 @@
 import torch
 import os
 import numpy as np
+import json
 from pathlib import Path
 from PIL import Image, ImageOps
 
@@ -138,7 +139,11 @@ class SaveImageWithNoise:
                 "seed_noise": ("NOISE_STATE",),
                 "filename_prefix": ("STRING", {"default": "frame"}),
                 "subfolder": ("STRING", {"default": "animations/01/"}),
-            }
+            },
+            "hidden": {
+                "prompt": "PROMPT",
+                "extra_pnginfo": "EXTRA_PNGINFO"
+            },
         }
 
     CATEGORY = "NoiseWarp"
@@ -146,7 +151,7 @@ class SaveImageWithNoise:
     OUTPUT_NODE = True
     FUNCTION = "save_image_and_noise"
 
-    def save_image_and_noise(self, images, seed_noise, filename_prefix, subfolder):
+    def save_image_and_noise(self, images, seed_noise, filename_prefix, subfolder, prompt=None, extra_pnginfo=None):
         # Get output directory
         output_dir = Path(folder_paths.get_output_directory()) / subfolder
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -181,8 +186,25 @@ class SaveImageWithNoise:
             filename = f"{filename_prefix}_{counter:05d}.png"
             filepath = output_dir / filename
             
-            # Save image
-            img.save(filepath, compress_level=4)
+            # Prepare metadata
+            metadata = None
+            if extra_pnginfo is not None:
+                metadata = {}
+                for key in extra_pnginfo:
+                    metadata[key] = extra_pnginfo[key]
+            
+            # Add workflow/prompt metadata to PNG
+            from PIL.PngImagePlugin import PngInfo
+            pnginfo = PngInfo()
+            
+            if prompt is not None:
+                pnginfo.add_text("prompt", json.dumps(prompt))
+            if metadata:
+                for key, value in metadata.items():
+                    pnginfo.add_text(key, json.dumps(value) if not isinstance(value, str) else value)
+            
+            # Save image with metadata
+            img.save(filepath, pnginfo=pnginfo, compress_level=4)
             
             # Save noise state as compressed npz
             noise_filename = f"{filename_prefix}_{counter:05d}.npz"
